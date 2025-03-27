@@ -8,11 +8,12 @@ from tqdm import tqdm
 import nltk
 from nltk.translate.bleu_score import corpus_bleu, SmoothingFunction
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Union, Any, Callable
-from dataloader import get_loader
+from typing import Dict, List, Tuple, Optional, Union, Any, Callable, Type
+from utils.dataloader import get_loader
 from functools import lru_cache
 import pandas as pd
 from collections import defaultdict
+from model.base_model import BaseModel
 
 class Evaluator:
     def __init__(
@@ -62,7 +63,8 @@ class Evaluator:
         # Image transform
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
-            transforms.ToTensor()
+            transforms.ToTensor(),
+            transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
         ])
     
     def _download_nltk_resources(self) -> None:
@@ -74,48 +76,36 @@ class Evaluator:
     
     def load_model(
         self, 
-        model_class: Optional[Any] = None, 
-        checkpoint_path: Optional[str] = None, 
+        model_class: Type[BaseModel], 
         **model_kwargs
-    ) -> Tuple[Any, Any]:
+    ) -> Tuple[BaseModel, Any]:
         """
         Load model from checkpoint
         
         Args:
             model_class: The model class to instantiate
-            checkpoint_path: Path to the checkpoint file (uses self.checkpoint_path if None)
             model_kwargs: Additional keyword arguments for the model
             
         Returns:
             Tuple of (model, vocab)
         """
-        if checkpoint_path is None:
-            checkpoint_path = self.checkpoint_path
-            
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
+        if not os.path.exists(self.checkpoint_path):
+            raise FileNotFoundError(f"No checkpoint found at {self.checkpoint_path}")
         
         # Load checkpoint with appropriate device mapping
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(self.checkpoint_path, map_location=self.device)
         self.vocab = checkpoint['vocab']
         
-        # Initialize model with provided class and arguments
-        if model_class is not None:
-            # If vocab_size is not provided, use the one from the checkpoint
-            if 'vocab_size' not in model_kwargs and hasattr(self.vocab, '__len__'):
-                model_kwargs['vocab_size'] = len(self.vocab)
-                
-            self.model = model_class(**model_kwargs).to(self.device)
-            
-            # Load model weights
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            # If no model class is provided, assume the model is already initialized
-            if self.model is None:
-                raise ValueError("Model must be initialized or model_class must be provided")
-                
-            # Load model weights
-            self.model.load_state_dict(checkpoint['model_state_dict'])
+        # Add vocab_size to model parameters if not provided
+        if 'vocab_size' not in model_kwargs and hasattr(self.vocab, '__len__'):
+            model_kwargs['vocab_size'] = len(self.vocab)
+        
+        # Initialize model
+        self.model = model_class(**model_kwargs).to(self.device)
+        
+        # Load model weights
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        
         return self.model, self.vocab
     
     def load_data(self) -> Any:
@@ -335,9 +325,9 @@ class Evaluator:
         
     def run_evaluation(
         self, 
-        model_class: Optional[Any] = None, 
+        model_class: Type[BaseModel],
         visualize: bool = True, 
-        num_examples: int = 10, 
+        num_examples: int = 10,
         **model_kwargs
     ) -> Dict[str, float]:
         """
@@ -357,6 +347,7 @@ class Evaluator:
         
         # Load data
         self.load_data()
+        
         # Evaluate BLEU score
         bleu_scores = self.evaluate_bleu()
         
@@ -377,26 +368,3 @@ class Evaluator:
             
         return bleu_scores
 
-
-if __name__  == "__main__":
-    from model.cnntornn import CNNtoRNN
-    # Initialize evaluator
-    evaluator = Evaluator(
-        data_root='data/flickr8k/Flicker8k_Dataset',
-        captions_file='data/flickr8k/captions.txt',
-        checkpoint_path='checkpoints/best_model.pth.tar',
-        beam_search=True,
-        device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        batch_size=1,
-        visualization_dir='visualization_results'
-    )
-    
-    # Run evaluation with CNNtoRNN model
-    evaluator.run_evaluation(
-        model_class=CNNtoRNN,
-        embed_size=256,  # Increased from 256 to 512
-        hidden_size=512,  # Increased from 256 to 512
-        num_layers=1,    # Increased from 1 to 2
-        visualize=True,
-        num_examples=10
-    )

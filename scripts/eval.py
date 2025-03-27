@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate an image captioning model")
     parser.add_argument("--config", type=str, default=None, help="Path to config file")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
+    parser.add_argument("--model", type=str, default="cnntornn", help="Model type to use")
     args = parser.parse_args()
     
     # Load configuration
@@ -29,16 +30,34 @@ def main():
     if args.checkpoint:
         checkpoint_path = args.checkpoint
     else:
-        checkpoint_path = os.path.join("checkpoints", "best_model.pth.tar")
+        checkpoint_path = os.path.join(Config.train.checkpoint_dir, "best_model.pth.tar")
     
     beam_search = Config.evaluate.beam_search
     beam_size = Config.evaluate.beam_size
     visualize = Config.evaluate.visualize
     
     # Create visualization directory if it doesn't exist
-    visualize_dir = os.path.join("logs", "visualizations")
+    visualize_dir = Config.evaluate.visualize_dir
     if visualize:
         os.makedirs(visualize_dir, exist_ok=True)
+    
+    # Get model class based on model argument
+    model_class = CNNtoRNN  # Default model
+    
+    # You can add more model types here as they are implemented
+    # if args.model == "your_custom_model":
+    #     from model.your_custom_model import YourCustomModel
+    #     model_class = YourCustomModel
+    
+    # Model-specific parameters
+    # These parameters should be defined in the model class itself
+    model_kwargs = {
+        'embed_size': 256,
+        'hidden_size': 512,
+        'num_layers': 1,
+        'trainCNN': False,
+        'dropout_rate': 0.5
+    }
     
     # Initialize evaluator
     evaluator = Evaluator(
@@ -56,14 +75,10 @@ def main():
     print(f"Using beam search: {beam_search}, beam size: {beam_size}")
     
     bleu_scores = evaluator.run_evaluation(
-        model_class=CNNtoRNN,
-        embed_size=Config.model.embed_size,
-        hidden_size=Config.model.hidden_size,
-        num_layers=Config.model.num_layers,
-        vocab_size=None,  # Will be determined from checkpoint
-        dropout_rate=Config.model.dropout,
+        model_class=model_class,
         visualize=visualize,
         num_examples=Config.evaluate.num_examples,
+        **model_kwargs
     )
     
     # Plot BLEU scores

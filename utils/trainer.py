@@ -7,24 +7,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 import os
-from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+from typing import Dict, List, Tuple, Optional, Union, Any, Callable, Type
 from utils.dataloader import get_loader
+from model.base_model import BaseModel
 
 class Trainer:
     def __init__(
         self, 
         data_root: str = 'data/flickr8k/Flicker8k_Dataset',
         captions_file: str = 'data/flickr8k/captions.txt',
-        embed_size: int = 256,
-        hidden_size: int = 256,
-        num_layers: int = 1,
         learning_rate: float = 3e-4,
         batch_size: int = 32,
         num_epochs: int = 10,
         save_step: int = 1,
         checkpoint_dir: str = 'checkpoints',
         device: Optional[torch.device] = None,
-        freeze_cnn_epochs: int = 3,
+        freeze_encoder_epochs: int = 3,
         use_mixed_precision: bool = True,
         early_stopping_patience: int = 5
     ):
@@ -34,31 +32,25 @@ class Trainer:
         Args:
             data_root: Path to the dataset images
             captions_file: Path to the captions file
-            embed_size: Size of the embedding vector
-            hidden_size: Size of the LSTM hidden state
-            num_layers: Number of LSTM layers
             learning_rate: Learning rate for optimizer
             batch_size: Batch size for training
             num_epochs: Number of training epochs
             save_step: Frequency of saving checkpoints (in epochs)
             checkpoint_dir: Directory to save checkpoints
             device: Device to run the model on (cuda or cpu)
-            freeze_cnn_epochs: Number of epochs to freeze CNN
+            freeze_encoder_epochs: Number of epochs to freeze encoder
             use_mixed_precision: Whether to use mixed precision training
             early_stopping_patience: Number of epochs to wait for improvement before stopping
         """
         # Hyperparameters
         self.data_root = data_root
         self.captions_file = captions_file
-        self.embed_size = embed_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.save_step = save_step
         self.checkpoint_dir = checkpoint_dir
-        self.freeze_cnn_epochs = freeze_cnn_epochs
+        self.freeze_encoder_epochs = freeze_encoder_epochs
         self.use_mixed_precision = use_mixed_precision and torch.cuda.is_available()
         self.early_stopping_patience = early_stopping_patience
         
@@ -83,7 +75,7 @@ class Trainer:
         self.scheduler = None
         
         # Initialize mixed precision scaler
-        self.scaler = torch.amp.GradScaler("cuda") if self.use_mixed_precision else None
+        self.scaler = torch.amp.GradScaler() if self.use_mixed_precision else None
         
         # Image transform
         self.transform = transforms.Compose([
@@ -150,7 +142,7 @@ class Trainer:
         
         return self.train_loader, self.val_loader
     
-    def initialize_model(self, model_class: Any, **model_kwargs) -> Any:
+    def initialize_model(self, model_class: Type[BaseModel], **model_kwargs) -> BaseModel:
         """
         Initialize the model, loss function, and optimizer
         
@@ -161,7 +153,11 @@ class Trainer:
         Returns:
             Initialized model
         """
-        # Initialize model with provided class and arguments
+        # Add vocab_size to model parameters if not provided
+        if 'vocab_size' not in model_kwargs and self.vocab_size is not None:
+            model_kwargs['vocab_size'] = self.vocab_size
+            
+        # Initialize model
         self.model = model_class(**model_kwargs).to(self.device)
         
         # Initialize loss function and optimizer
@@ -182,7 +178,7 @@ class Trainer:
     def load_checkpoint(
         self, 
         checkpoint_path: Optional[str] = None, 
-        model_class: Optional[Any] = None, 
+        model_class: Optional[Type[BaseModel]] = None, 
         **model_kwargs
     ) -> int:
         """
@@ -204,6 +200,11 @@ class Trainer:
             
             # Initialize model if not already initialized
             if self.model is None and model_class is not None:
+                # Add vocab_size to model parameters if not provided
+                if 'vocab_size' not in model_kwargs and 'vocab' in checkpoint:
+                    model_kwargs['vocab_size'] = len(checkpoint['vocab'])
+                    
+                # Initialize model
                 self.model = model_class(**model_kwargs).to(self.device)
                 
             # Load model weights
@@ -223,6 +224,11 @@ class Trainer:
             # Load scaler if it exists in checkpoint and we're using mixed precision
             if 'scaler_state_dict' in checkpoint and self.scaler is not None:
                 self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            
+            # Load vocabulary if it exists in checkpoint
+            if 'vocab' in checkpoint and self.dataset is not None:
+                self.dataset.vocab = checkpoint['vocab']
+                self.vocab_size = len(checkpoint['vocab'])
             
             start_epoch = checkpoint['epoch'] + 1
             print(f"Loaded checkpoint from epoch {start_epoch-1}")
@@ -302,7 +308,7 @@ class Trainer:
                 self.optimizer.zero_grad()
                 
                 if self.use_mixed_precision and self.scaler is not None:
-                    with torch.amp.autocast("cuda"):
+                    with torch.amp.autocast(device_type=self.device.type):
                         outputs = self.model(imgs, captions[:-1])  # Remove <EOS> token for input
                         loss = self.criterion(
                             outputs.reshape(-1, self.vocab_size),
@@ -411,7 +417,7 @@ class Trainer:
         
         Args:
             start_epoch: Starting epoch number
-            unfreeze_encoder: Whether to unfreeze the encoder after freeze_cnn_epochs
+            unfreeze_encoder: Whether to unfreeze the encoder after freeze_encoder_epochs
         """
         print("Starting training...")
         
@@ -422,9 +428,11 @@ class Trainer:
         for epoch in range(start_epoch, self.num_epochs):
             print(f"Epoch [{epoch+1}/{self.num_epochs}]")
             
-            # Unfreeze CNN after specified number of epochs if model has encoder attribute
-            if unfreeze_encoder and epoch == self.freeze_cnn_epochs and hasattr(self.model, 'encoder'):
+            # Unfreeze encoder after specified number of epochs if model has encoder attribute
+            if unfreeze_encoder and epoch == self.freeze_encoder_epochs and hasattr(self.model, 'encoder'):
                 print("Unfreezing encoder layers...")
+                # Different models might have different ways to control encoder training
+                # For CNNtoRNN, it's the train_CNN attribute
                 if hasattr(self.model.encoder, 'train_CNN'):
                     self.model.encoder.train_CNN = True
                 # Reinitialize optimizer with all parameters
@@ -518,3 +526,4 @@ class Trainer:
             except Exception as e:
                 print(f"Error evaluating example {idx}: {e}")
                 continue
+

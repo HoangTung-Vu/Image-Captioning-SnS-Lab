@@ -3,6 +3,7 @@ import torch.nn as nn
 import torchvision.models as models
 from torchvision.models import ResNet18_Weights
 from typing import Tuple, List, Optional, Dict, Any, Union
+from model.base_model import BaseModel
 
 class Encoder(nn.Module):
     def __init__(self, embed_size: int, train_CNN: bool = False, dropout_rate: float = 0.5):
@@ -134,7 +135,7 @@ class Decoder(nn.Module):
         
         return outputs
 
-class CNNtoRNN(nn.Module):
+class CNNtoRNN(BaseModel):
     def __init__(
         self, 
         embed_size: int, 

@@ -17,7 +17,7 @@ The image captioning model employs an encoder-decoder architecture:
 1. **Encoder**: A convolutional neural network (CNN) extracts feature representations from input images.
 2. **Decoder**: A recurrent neural network (RNN), such as Long Short-Term Memory (LSTM), generates textual descriptions based on the encoded image features.
 
-This approach aligns with methodologies discussed in related projects, such as the implementation of a Neural Image Caption (NIC) network for generating image captions. citeturn0search1
+This approach aligns with methodologies discussed in related projects, such as the implementation of a Neural Image Caption (NIC) network for generating image captions
 
 ## Datasets
 
@@ -27,7 +27,7 @@ Commonly used datasets for image captioning tasks include:
 - **Flickr30K**: A dataset comprising 30,000 images with corresponding captions collected from Flickr.
 - **Flickr8K**: Consists of 8,000 images, each annotated with five different captions.
 
-These datasets are widely utilized in the field of image captioning. citeturn0search4
+These datasets are widely utilized in the field of image captioning.
 
 ## Evaluation Metrics
 

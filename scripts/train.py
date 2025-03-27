@@ -2,7 +2,6 @@ import os
 import sys
 import torch
 import argparse
-import torchvision.transforms as transforms
 
 # Add parent directory to path to allow imports from project root
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,7 +9,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.cnntornn import CNNtoRNN
 from utils.trainer import Trainer
 from utils.config import Config
-from utils.dataloader import get_loader
 
 def main():
     """
@@ -19,6 +17,7 @@ def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train an image captioning model")
     parser.add_argument("--config", type=str, default=None, help="Path to config file")
+    parser.add_argument("--model", type=str, default="cnntornn", help="Model type to use")
     parser.add_argument("--resume", action="store_true", help="Resume training from checkpoint")
     args = parser.parse_args()
     
@@ -37,16 +36,13 @@ def main():
     trainer = Trainer(
         data_root=Config.data.data_root,
         captions_file=Config.data.captions_file,
-        embed_size=Config.model.embed_size,
-        hidden_size=Config.model.hidden_size,
-        num_layers=Config.model.num_layers,
         learning_rate=Config.train.learning_rate,
         batch_size=Config.train.batch_size,
         num_epochs=Config.train.num_epochs,
         save_step=Config.train.save_step,
-        checkpoint_dir="checkpoints",  # Use absolute path from project root
+        checkpoint_dir=Config.train.checkpoint_dir,
         device=torch.device(Config.device),
-        freeze_cnn_epochs=Config.train.freeze_cnn_epochs,
+        freeze_encoder_epochs=Config.train.freeze_encoder_epochs,
         use_mixed_precision=Config.train.use_mixed_precision,
         early_stopping_patience=Config.train.early_stopping_patience
     )
@@ -55,20 +51,26 @@ def main():
     print("Loading data...")
     train_loader, val_loader = trainer.load_data()
     
-    # Get vocabulary size from dataset
-    vocab_size = len(trainer.dataset.vocab)
-    print(f"Vocabulary size: {vocab_size}")
+    # Get model class based on model argument
+    model_class = CNNtoRNN  # Default model
     
-    # Initialize model
+    # You can add more model types here as they are implemented
+    # if args.model == "your_custom_model":
+    #     from model.your_custom_model import YourCustomModel
+    #     model_class = YourCustomModel
+    
+    # Initialize model with model-specific parameters
+    # These parameters should be defined in the model class itself
     print("Initializing model...")
-    model = trainer.initialize_model(
-        model_class=CNNtoRNN,
-        embed_size=Config.model.embed_size,
-        hidden_size=Config.model.hidden_size,
-        vocab_size=vocab_size,
-        num_layers=Config.model.num_layers,
-        dropout_rate=Config.model.dropout
-    )
+    model_kwargs = {
+        'embed_size': 256,
+        'hidden_size': 512,
+        'num_layers': 1,
+        'trainCNN': False,
+        'dropout_rate': 0.5
+    }
+    
+    model = trainer.initialize_model(model_class, **model_kwargs)
     
     # Load checkpoint if resuming training
     start_epoch = 0
@@ -76,22 +78,14 @@ def main():
         if Config.train.checkpoint_path:
             start_epoch = trainer.load_checkpoint(
                 checkpoint_path=Config.train.checkpoint_path,
-                model_class=CNNtoRNN,
-                embed_size=Config.model.embed_size,
-                hidden_size=Config.model.hidden_size,
-                vocab_size=vocab_size,
-                num_layers=Config.model.num_layers,
-                dropout_rate=Config.model.dropout
+                model_class=model_class,
+                **model_kwargs
             )
         else:
             # Try to load latest checkpoint
             start_epoch = trainer.load_checkpoint(
-                model_class=CNNtoRNN,
-                embed_size=Config.model.embed_size,
-                hidden_size=Config.model.hidden_size,
-                vocab_size=vocab_size,
-                num_layers=Config.model.num_layers,
-                dropout_rate=Config.model.dropout
+                model_class=model_class,
+                **model_kwargs
             )
     
     # Train model
@@ -102,4 +96,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+
