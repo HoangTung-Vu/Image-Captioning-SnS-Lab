@@ -71,7 +71,7 @@ def main():
     
     model = trainer.initialize_model(model_class, **model_kwargs)
     
-    # Load checkpoint if resuming training
+
     start_epoch = 0
     if args.resume or Config.train.resume:
         if Config.train.checkpoint_path:

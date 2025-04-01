@@ -19,7 +19,6 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate an image captioning model")
     parser.add_argument("--config", type=str, default=None, help="Path to config file")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
-    parser.add_argument("--model", type=str, default="cnntornn", help="Model type to use")
     args = parser.parse_args()
     
     # Load configuration
