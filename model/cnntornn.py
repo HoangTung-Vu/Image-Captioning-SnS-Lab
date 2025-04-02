@@ -161,6 +161,7 @@ class CNNtoRNN(BaseModel):
         # Initialize encoder and decoder
         self.encoder = Encoder(embed_size, trainCNN, dropout_rate)
         self.decoder = Decoder(embed_size, hidden_size, vocab_size, num_layers, dropout_rate)
+        self.has_mha_decoder = False
     
     def forward(
         self, 

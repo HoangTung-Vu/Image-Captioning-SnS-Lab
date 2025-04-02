@@ -5,6 +5,7 @@ from typing import Tuple, List, Optional, Dict, Any, Union
 class BaseModel(nn.Module):
     """Base class for all models"""
     def __init__(self):
+        self.has_mha_decoder = False
         super(BaseModel, self).__init__()
     
     def forward(self, images: torch.Tensor, captions: torch.Tensor) -> torch.Tensor:

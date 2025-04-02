@@ -106,6 +106,14 @@ class Evaluator:
         # Load model weights
         self.model.load_state_dict(checkpoint['model_state_dict'])
         
+        # Set model to evaluation mode
+        self.model.eval()
+        
+        # Print model information
+        print(f"Model: {self.model.__class__.__name__}")
+        print(f"Has MHA Decoder: {self.model.has_mha_decoder}")
+        print(f"Loaded checkpoint from: {self.checkpoint_path}")
+        
         return self.model, self.vocab
     
     def load_data(self) -> Any:
@@ -187,13 +195,8 @@ class Evaluator:
             image = Image.open(image_path).convert("RGB")
             image_tensor = self.transform(image).unsqueeze(0).to(self.device)
             
-            # Generate caption
-            if self.beam_search and hasattr(self.model, 'caption_image_beam_search'):
-                predicted_caption = self.model.caption_image_beam_search(image_tensor, self.vocab, beam_size=3)
-            elif hasattr(self.model, 'caption_image_greedy'):
-                predicted_caption = self.model.caption_image_greedy(image_tensor, self.vocab)
-            else:
-                raise ValueError("Model must have caption_image_greedy or caption_image_beam_search method")
+            # Generate caption using the appropriate method
+            predicted_caption = self._generate_caption(image_tensor)
             
             # Process predicted caption
             hypothesis = [token for token in predicted_caption if token not in ["<SOS>", "<PAD>"]]
@@ -224,6 +227,25 @@ class Evaluator:
         }
         
         return bleu_scores
+    
+    def _generate_caption(self, image_tensor: torch.Tensor) -> List[str]:
+        """
+        Generate a caption for an image using the appropriate method
+        
+        Args:
+            image_tensor: Input image tensor
+            
+        Returns:
+            List of tokens in the generated caption
+        """
+        # Use beam search if specified and available
+        if self.beam_search and hasattr(self.model, 'caption_image_beam_search'):
+            return self.model.caption_image_beam_search(image_tensor, self.vocab, beam_size=3)
+        # Otherwise use greedy search if available
+        elif hasattr(self.model, 'caption_image_greedy'):
+            return self.model.caption_image_greedy(image_tensor, self.vocab)
+        else:
+            raise ValueError("Model must implement either caption_image_greedy or caption_image_beam_search method")
     
     @staticmethod
     def _calculate_bleu(
@@ -287,15 +309,14 @@ class Evaluator:
             greedy_caption = "Greedy caption method not available"
             beam_caption = "Beam search method not available"
             
+            # Try to generate captions using different methods
             if hasattr(self.model, 'caption_image_greedy'):
                 greedy_tokens = self.model.caption_image_greedy(image_tensor, self.vocab)
-                greedy_caption = ' '.join([token for token in greedy_tokens 
-                                          if token not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]])
+                greedy_caption = self._tokens_to_caption(greedy_tokens)
             
             if hasattr(self.model, 'caption_image_beam_search'):
                 beam_tokens = self.model.caption_image_beam_search(image_tensor, self.vocab, beam_size=5)
-                beam_caption = ' '.join([token for token in beam_tokens 
-                                        if token not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]])
+                beam_caption = self._tokens_to_caption(beam_tokens)
             
             # Create figure
             plt.figure(figsize=(10, 8))
@@ -322,6 +343,23 @@ class Evaluator:
             plt.close()
             
         print(f"Visualization examples saved to {self.visualization_dir}/")
+    
+    def _tokens_to_caption(self, tokens: List[str]) -> str:
+        """
+        Convert a list of tokens to a readable caption string
+        
+        Args:
+            tokens: List of tokens
+            
+        Returns:
+            Caption string
+        """
+        # Filter out special tokens
+        filtered_tokens = [token for token in tokens 
+                          if token not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]]
+        
+        # Join tokens into a string
+        return ' '.join(filtered_tokens)
         
     def run_evaluation(
         self, 

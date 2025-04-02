@@ -61,8 +61,6 @@ class Trainer:
         if not os.path.exists(self.checkpoint_dir):
             os.makedirs(self.checkpoint_dir)
             
-        # Initialize tensorboard writer
-        self.writer = SummaryWriter('runs/image_captioning')
         
         # Initialize model, data loader, etc. to None
         self.model = None
@@ -159,9 +157,11 @@ class Trainer:
             
         # Initialize model
         self.model = model_class(**model_kwargs).to(self.device)
+        # Initialize tensorboard writer
+        self.writer = SummaryWriter(f'runs/image_captioning/{self.model.__class__.__name__}')
         
         # Initialize loss function and optimizer
-        self.criterion = nn.CrossEntropyLoss(ignore_index=self.dataset.vocab.stoi["<PAD>"])
+        self.criterion = nn.CrossEntropyLoss(ignore_index=self.dataset.vocab.stoi["<PAD>"], reduction='none')
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         
         # Initialize learning rate scheduler
@@ -172,7 +172,7 @@ class Trainer:
             patience=2, 
             verbose=True
         )
-        
+        self.checkpoint_dir = os.path.join(self.checkpoint_dir, f'{self.model.__class__.__name__}')
         return self.model
     
     def load_checkpoint(
@@ -246,6 +246,7 @@ class Trainer:
             loss: Current loss value
             is_best: Whether this is the best model so far
         """
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
         checkpoint_path = os.path.join(self.checkpoint_dir, f'model_epoch_{epoch+1}.pth.tar')
         
         # Prepare checkpoint data
@@ -279,6 +280,68 @@ class Trainer:
         
         print(f"Checkpoint saved to {checkpoint_path}")
     
+    def _prepare_batch_for_model(self, imgs: torch.Tensor, captions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Prepare batch data for the model based on model type
+        
+        Args:
+            imgs: Batch of images
+            captions: Batch of captions
+            
+        Returns:
+            Tuple of (input_captions, target_captions, padding_mask)
+        """
+        # Move data to device
+        imgs = imgs.to(self.device, non_blocking=False)
+        captions = captions.to(self.device, non_blocking=False)
+        
+        # For models with multi-head attention decoder, we need to create a padding mask
+        if hasattr(self.model, 'has_mha_decoder') and self.model.has_mha_decoder:
+            # Create padding mask (1 for tokens, 0 for padding)
+            padding_mask = (captions != self.dataset.vocab.stoi["<PAD>"]).float()
+            
+            # For transformer models, target is shifted by one position
+            input_captions = captions[:-1]  # Remove last token (EOS)
+            target_captions = captions[1:]  # Remove first token (SOS)
+            
+            return imgs, input_captions, padding_mask[:-1]  # Remove last position from padding mask
+        else:
+            # For CNNtoRNN models, input is all tokens except the last, target is all tokens
+            input_captions = captions[:-1]  # Remove last token (EOS)
+            target_captions = captions
+            
+            return imgs, input_captions, None
+    
+    def _compute_loss(self, outputs: torch.Tensor, targets: torch.Tensor, padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute loss based on model type
+        
+        Args:
+            outputs: Model outputs
+            targets: Target captions
+            padding_mask: Padding mask for transformer models
+            
+        Returns:
+            Loss value
+        """
+        # Reshape outputs and targets for loss calculation
+        if hasattr(self.model, 'has_mha_decoder') and self.model.has_mha_decoder and padding_mask is not None:
+            # For transformer models, apply padding mask to loss
+            loss = self.criterion(
+                outputs.reshape(-1, self.vocab_size),
+                targets.reshape(-1)
+            )
+            # Apply padding mask and calculate mean
+            loss = (loss.reshape_as(targets) * padding_mask).sum() / padding_mask.sum().clamp(min=1.0)
+        else:
+            # For CNNtoRNN models, use standard loss calculation
+            loss = self.criterion(
+                outputs.reshape(-1, self.vocab_size),
+                targets.reshape(-1)
+            ).mean()
+        
+        return loss
+    
     def train_epoch(self, epoch: int) -> float:
         """
         Train for one epoch
@@ -300,20 +363,22 @@ class Trainer:
         progress_bar = tqdm(self.train_loader, desc=f"Training Epoch {epoch+1}")
         for idx, (imgs, captions) in enumerate(progress_bar):
             try:
-                # Move to device safely
-                imgs = imgs.to(self.device, non_blocking=False)
-                captions = captions.to(self.device, non_blocking=False)
+                # Prepare batch data for the model
+                imgs, input_captions, padding_mask = self._prepare_batch_for_model(imgs, captions)
                 
                 # Forward pass with mixed precision if enabled
                 self.optimizer.zero_grad()
                 
                 if self.use_mixed_precision and self.scaler is not None:
                     with torch.amp.autocast(device_type=self.device.type):
-                        outputs = self.model(imgs, captions[:-1])  # Remove <EOS> token for input
-                        loss = self.criterion(
-                            outputs.reshape(-1, self.vocab_size),
-                            captions.reshape(-1)
-                        )
+                        # Forward pass based on model type
+                        if hasattr(self.model, 'has_mha_decoder') and self.model.has_mha_decoder and padding_mask is not None:
+                            outputs = self.model(imgs, input_captions, padding_mask=padding_mask)
+                        else:
+                            outputs = self.model(imgs, input_captions)
+                        
+                        # Compute loss
+                        loss = self._compute_loss(outputs, captions[1:] if self.model.has_mha_decoder else captions, padding_mask)
                     
                     # Backward pass with gradient scaling
                     self.scaler.scale(loss).backward()
@@ -322,12 +387,14 @@ class Trainer:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    # Standard forward and backward pass
-                    outputs = self.model(imgs, captions[:-1])
-                    loss = self.criterion(
-                        outputs.reshape(-1, self.vocab_size),
-                        captions.reshape(-1)
-                    )
+                    # Standard forward pass based on model type
+                    if hasattr(self.model, 'has_mha_decoder') and self.model.has_mha_decoder and padding_mask is not None:
+                        outputs = self.model(imgs, input_captions, padding_mask=padding_mask)
+                    else:
+                        outputs = self.model(imgs, input_captions)
+                    
+                    # Compute loss
+                    loss = self._compute_loss(outputs, captions[1:] if self.model.has_mha_decoder else captions, padding_mask)
                     
                     # Backward pass
                     loss.backward()
@@ -350,7 +417,7 @@ class Trainer:
                 continue
         
         # Calculate average loss for the epoch
-        avg_loss = epoch_loss / num_batches
+        avg_loss = epoch_loss / max(1, num_batches)
         
         # Log to tensorboard
         self.writer.add_scalar('Training/EpochLoss', avg_loss, epoch)
@@ -379,18 +446,17 @@ class Trainer:
             progress_bar = tqdm(self.val_loader, desc=f"Validation Epoch {epoch+1}")
             for idx, (imgs, captions) in enumerate(progress_bar):
                 try:
-                    # Move to device safely
-                    imgs = imgs.to(self.device, non_blocking=False)
-                    captions = captions.to(self.device, non_blocking=False)
+                    # Prepare batch data for the model
+                    imgs, input_captions, padding_mask = self._prepare_batch_for_model(imgs, captions)
                     
-                    # Forward pass
-                    outputs = self.model(imgs, captions[:-1])
+                    # Forward pass based on model type
+                    if hasattr(self.model, 'has_mha_decoder') and self.model.has_mha_decoder and padding_mask is not None:
+                        outputs = self.model(imgs, input_captions, padding_mask=padding_mask)
+                    else:
+                        outputs = self.model(imgs, input_captions)
                     
-                    # Calculate loss
-                    loss = self.criterion(
-                        outputs.reshape(-1, self.vocab_size),
-                        captions.reshape(-1)
-                    )
+                    # Compute loss
+                    loss = self._compute_loss(outputs, captions[1:] if self.model.has_mha_decoder else captions, padding_mask)
                     
                     # Update metrics
                     val_loss += loss.item()
@@ -497,16 +563,14 @@ class Trainer:
                 with torch.no_grad():
                     # Try both methods if they exist
                     if hasattr(self.model, 'caption_image_greedy'):
-                        greedy_caption = self.model.caption_image_greedy(img, self.dataset.vocab)
-                        greedy_caption = ' '.join([word for word in greedy_caption 
-                                                if word not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]])
+                        greedy_tokens = self.model.caption_image_greedy(img, self.dataset.vocab)
+                        greedy_caption = self._tokens_to_caption(greedy_tokens)
                     else:
                         greedy_caption = "Greedy caption method not available"
                     
                     if hasattr(self.model, 'caption_image_beam_search'):
-                        beam_caption = self.model.caption_image_beam_search(img, self.dataset.vocab, beam_size=3)
-                        beam_caption = ' '.join([word for word in beam_caption 
-                                                if word not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]])
+                        beam_tokens = self.model.caption_image_beam_search(img, self.dataset.vocab, beam_size=3)
+                        beam_caption = self._tokens_to_caption(beam_tokens)
                     else:
                         beam_caption = "Beam search method not available"
                 
@@ -526,4 +590,21 @@ class Trainer:
             except Exception as e:
                 print(f"Error evaluating example {idx}: {e}")
                 continue
+    
+    def _tokens_to_caption(self, tokens: List[str]) -> str:
+        """
+        Convert a list of tokens to a readable caption string
+        
+        Args:
+            tokens: List of tokens
+            
+        Returns:
+            Caption string
+        """
+        # Filter out special tokens
+        filtered_tokens = [token for token in tokens 
+                          if token not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]]
+        
+        # Join tokens into a string
+        return ' '.join(filtered_tokens)
 

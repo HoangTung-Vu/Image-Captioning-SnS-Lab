@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import math
-from base_model import BaseModel
-from typing import List, Any
+from model.base_model import BaseModel
+from typing import Tuple, List, Optional, Dict, Any, Union
+
 
 def extract_patches(image_tensor, patch_size=16):
     # Get the dimensions of the image tensor
@@ -105,11 +106,11 @@ class TransformerBlock(nn.Module):
     
 # Define a decoder module for the Transformer architecture
 class Decoder(nn.Module):
-    def __init__(self, num_emb, hidden_size=128, num_layers=3, num_heads=4):
+    def __init__(self, vocab_size, hidden_size=128, num_layers=3, num_heads=4):
         super(Decoder, self).__init__()
         
         # Create an embedding layer for tokens
-        self.embedding = nn.Embedding(num_emb, hidden_size)
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
         # Initialize the embedding weights
         self.embedding.weight.data = 0.001 * self.embedding.weight.data
 
@@ -123,7 +124,7 @@ class Decoder(nn.Module):
         ])
                 
         # Define a linear layer for output prediction
-        self.fc_out = nn.Linear(hidden_size, num_emb)
+        self.fc_out = nn.Linear(hidden_size, vocab_size)
         
     def forward(self, input_seq, encoder_output, input_padding_mask=None, 
                 encoder_padding_mask=None):        
@@ -179,65 +180,155 @@ class VisionEncoder(nn.Module):
             embs = block(embs)
         
         return embs
-
+    
+    
+# Define an Vision Encoder-Decoder module for the Transformer architecture
 class VisionEncoderDecoder(BaseModel):
-    def __init__(self, image_size, channels_in, num_emb, patch_size=16, 
+    def __init__(self, image_size, channels_in, vocab_size, patch_size=16, 
                  hidden_size=128, num_layers=(3, 3), num_heads=4):
         super(VisionEncoderDecoder, self).__init__()
         
+        # Create an encoder and decoder with specified parameters
         self.encoder = VisionEncoder(image_size=image_size, channels_in=channels_in, 
                                      patch_size=patch_size, hidden_size=hidden_size, 
                                      num_layers=num_layers[0], num_heads=num_heads)
         
-        self.decoder = Decoder(num_emb=num_emb, hidden_size=hidden_size, 
+        self.decoder = Decoder(vocab_size=vocab_size, hidden_size=hidden_size, 
                                num_layers=num_layers[1], num_heads=num_heads)
-        self.start_token = num_emb - 2  # Assuming second last token is <START>
-        self.end_token = num_emb - 1    # Assuming last token is <END>
+        
+        self.has_mha_decoder = True
+    def forward(self, input_image, target_seq, padding_mask):
+        # Generate padding masks for the target sequence
+        bool_padding_mask = padding_mask == 0
 
-    def forward(self, images: torch.Tensor, captions: torch.Tensor) -> torch.Tensor:
-        padding_mask = captions == 0  # Assuming padding token is 0
-        encoder_output = self.encoder(images)
-        return self.decoder(input_seq=captions, encoder_output=encoder_output, 
-                            padding_mask=padding_mask)
+        # Encode the input sequence
+        encoded_seq = self.encoder(image=input_image)
+        
+        # Decode the target sequence using the encoded sequence
+        decoded_seq = self.decoder(input_seq=target_seq, 
+                                   encoder_output=encoded_seq, 
+                                   input_padding_mask=bool_padding_mask)
+        return decoded_seq
     
     @torch.no_grad()
     def caption_image_greedy(self, image: torch.Tensor, vocabulary: Any, max_length: int = 50) -> List[str]:
-        encoder_output = self.encoder(image.unsqueeze(0))  # Add batch dim
-        caption = [self.start_token]
+        """Generate a caption from the image using greedy search"""
+        # Encode the image
+        encoded_image = self.encoder(image)
         
+        # Start with a batch of start tokens
+        batch_size = image.size(0)
+        current_tokens = torch.ones(batch_size, 1, dtype=torch.long, device=image.device) * vocabulary.stoi["<start>"]
+        
+        # Generate tokens one by one
         for _ in range(max_length):
-            caption_tensor = torch.tensor(caption, device=image.device).unsqueeze(0)  # (1, len)
-            output = self.decoder(caption_tensor, encoder_output, padding_mask=None)
-            next_word = output[:, -1, :].argmax(dim=-1).item()
+            # Get predictions for the next token
+            predictions = self.decoder(current_tokens, encoded_image)
+            # Take the last prediction (for the next token)
+            predictions = predictions[:, -1, :]
+            # Get the most likely token (greedy search)
+            next_token = torch.argmax(predictions, dim=-1, keepdim=True)
+            # Add the token to our sequence
+            current_tokens = torch.cat([current_tokens, next_token], dim=1)
             
-            if next_word == self.end_token:
+            # Stop if all sequences have generated an end token
+            if (next_token == vocabulary.stoi["<end>"]).all():
                 break
-            caption.append(next_word)
         
-        return [vocabulary.itos[idx] for idx in caption[1:]]  # Exclude <START>
+        # Convert token indices to words
+        captions = []
+        for tokens in current_tokens:
+            caption = []
+            for token in tokens:
+                word = vocabulary.itos[token.item()]
+                if word == "<start>":
+                    continue
+                if word == "<end>":
+                    break
+                caption.append(word)
+            captions.append(" ".join(caption))
+        
+        return captions
     
     @torch.no_grad()
     def caption_image_beam_search(self, image: torch.Tensor, vocabulary: Any, beam_size: int = 3, max_length: int = 50) -> List[str]:
-        encoder_output = self.encoder(image.unsqueeze(0))
-        sequences = [(0, [self.start_token])]
+        """Generate a caption from the image using beam search"""
+        # Encode the image
+        encoded_image = self.encoder(image)
         
-        for _ in range(max_length):
-            all_candidates = []
-            for score, seq in sequences:
-                caption_tensor = torch.tensor(seq, device=image.device).unsqueeze(0)
-                output = self.decoder(caption_tensor, encoder_output, padding_mask=None)
-                logits = output[:, -1, :]
-                probs = torch.nn.functional.log_softmax(logits, dim=-1)
-                topk_probs, topk_words = probs.topk(beam_size, dim=-1)
-                
-                for k in range(beam_size):
-                    candidate = (score + topk_probs[0, k].item(), seq + [topk_words[0, k].item()])
-                    all_candidates.append(candidate)
-                
-            sequences = sorted(all_candidates, key=lambda x: x[0], reverse=True)[:beam_size]
+        # Start with a batch of start tokens
+        batch_size = image.size(0)
+        start_token = vocabulary.stoi["<start>"]
+        end_token = vocabulary.stoi["<end>"]
+        
+        # Initialize beams for each image in the batch
+        all_captions = []
+        
+        for i in range(batch_size):
+            # Get the encoded features for this specific image
+            img_features = encoded_image[i:i+1]
             
-            if all(seq[-1] == self.end_token for _, seq in sequences):
-                break
+            # Initialize beam with start token
+            beams = [([start_token], 0.0)]  # (sequence, score)
+            complete_beams = []
+            
+            # Generate tokens step by step
+            for _ in range(max_length):
+                if len(beams) == 0:
+                    break
+                    
+                new_beams = []
+                # Expand each current beam
+                for seq, score in beams:
+                    # Skip if the sequence is already complete
+                    if seq[-1] == end_token:
+                        complete_beams.append((seq, score))
+                        continue
+                    
+                    # Convert sequence to tensor
+                    current_tokens = torch.tensor([seq], dtype=torch.long, device=image.device)
+                    
+                    # Get predictions
+                    predictions = self.decoder(current_tokens, img_features)
+                    # Get the last prediction
+                    predictions = predictions[0, -1, :]
+                    # Apply softmax to get probabilities
+                    probs = torch.nn.functional.softmax(predictions, dim=-1)
+                    
+                    # Get top-k next tokens
+                    topk_probs, topk_indices = torch.topk(probs, beam_size)
+                    
+                    # Add new beams
+                    for j in range(beam_size):
+                        token = topk_indices[j].item()
+                        prob = topk_probs[j].item()
+                        new_score = score - math.log(prob)  # Using negative log likelihood
+                        new_beams.append((seq + [token], new_score))
+                
+                # Keep only the top beam_size beams
+                beams = sorted(new_beams, key=lambda x: x[1])[:beam_size]
+                
+                # Check if all beams end with end_token
+                if all(beam[0][-1] == end_token for beam in beams):
+                    complete_beams.extend(beams)
+                    break
+            
+            # Add any incomplete beams to complete_beams
+            complete_beams.extend(beams)
+            
+            # Sort by score and take the best one
+            best_beam = sorted(complete_beams, key=lambda x: x[1])[0][0]
+            
+            # Convert token indices to words
+            caption = []
+            for token in best_beam:
+                word = vocabulary.itos[token]
+                if word == "<start>":
+                    continue
+                if word == "<end>":
+                    break
+                caption.append(word)
+            
+            all_captions.append(" ".join(caption))
         
-        best_sequence = max(sequences, key=lambda x: x[0])[1]
-        return [vocabulary.itos[idx] for idx in best_sequence[1:]]  # Exclude <START>
+        return all_captions
