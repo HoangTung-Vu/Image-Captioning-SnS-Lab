@@ -89,7 +89,7 @@ class Trainer:
         self.writer: Optional[SummaryWriter] = None
 
         # Initialize mixed precision scaler
-        self.scaler = torch.cuda.amp.GradScaler() if self.use_mixed_precision else None
+        self.scaler = torch.amp.GradScaler("cuda") if self.use_mixed_precision else None
         if self.use_mixed_precision:
             print("Mixed precision training enabled.")
 
@@ -456,7 +456,7 @@ class Trainer:
 
                 # Forward pass with Automatic Mixed Precision (AMP) if enabled
                 if self.use_mixed_precision and self.scaler:
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast("cuda"):
                         # outputs shape: [input_seq_len, batch_size, vocab_size]
                         outputs = self.model(imgs, input_captions, padding_mask=padding_mask)
                         # Reshape outputs for loss calculation: [(input_seq_len * batch_size), vocab_size]

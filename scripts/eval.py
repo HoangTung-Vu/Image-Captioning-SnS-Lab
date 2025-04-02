@@ -1,323 +1,239 @@
+# eval.py
+
 import os
 import sys
 import torch
 import argparse
 import json
-from typing import Dict, Any, Optional, Type, List, Tuple
+import time
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from PIL import Image
-import torchvision.transforms as transforms
-from tqdm import tqdm
+from typing import Dict, Any, Optional, Type, List, Tuple
 
-# Add parent directory to path to allow imports from project root
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.append(project_root)
 
+# Import the updated Evaluator class (which no longer uses pycocoevalcap)
 from utils.evaluate import Evaluator
 from utils.config import Config
 from model.base_model import BaseModel
 from model.cnntornn import CNNtoRNN
 from model.transformer import VisionEncoderDecoder
 
-def main():
-    """
-    Main function to evaluate image captioning models
-    """
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Evaluate image captioning models")
-    parser.add_argument("--config", type=str, default=None, help="Path to config file")
-    parser.add_argument("--models", type=str, nargs='+', default=["transformer", "cnntornn"], 
-                        help="Models to evaluate: transformer, cnntornn, or both")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
-    parser.add_argument("--beam_search", action="store_true", help="Use beam search for caption generation")
-    parser.add_argument("--beam_size", type=int, default=3, help="Beam size for beam search")
-    parser.add_argument("--visualize", action="store_true", help="Visualize examples")
-    parser.add_argument("--num_examples", type=int, default=10, help="Number of examples to visualize")
-    parser.add_argument("--test_image", type=str, default=None, help="Path to a single test image")
-    parser.add_argument("--compare", action="store_true", help="Compare results from different models")
-    args = parser.parse_args()
-    
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Store results for comparison
-    all_results = {}
-    
-    # Evaluate each specified model
-    for model_name in args.models:
-        print(f"\n{'='*50}")
-        print(f"Evaluating {model_name.upper()} model")
-        print(f"{'='*50}\n")
-        
-        # Load model-specific config if available
-        model_config_path = args.config
-        if model_config_path is None:
-            # Try to find model-specific config
-            default_config_path = f"configs/{model_name.lower()}_config.json"
-            if os.path.exists(default_config_path):
-                model_config_path = default_config_path
-                print(f"Using model-specific config: {model_config_path}")
-        
-        # Load configuration
-        if model_config_path and os.path.exists(model_config_path):
-            Config.load_from_json(model_config_path)
-            print(f"Loaded configuration from {model_config_path}")
-        else:
-            print("Using default configuration")
-        
-        # Get model class and kwargs
-        model_class, model_kwargs = get_model_config(model_name)
-        
-        # Set checkpoint path
-        checkpoint_path = args.checkpoint
-        if checkpoint_path is None:
-            # Try to use the best model checkpoint
-            best_model_path = os.path.join(Config.train.checkpoint_dir, model_name, "best_model.pth.tar")
-            if os.path.exists(best_model_path):
-                checkpoint_path = best_model_path
-                print(f"Using best model checkpoint: {checkpoint_path}")
-            else:
-                # Fall back to latest checkpoint
-                latest_path = os.path.join(Config.train.checkpoint_dir, model_name, "latest_checkpoint.pth.tar")
-                if os.path.exists(latest_path):
-                    checkpoint_path = latest_path
-                    print(f"Using latest checkpoint: {checkpoint_path}")
-                else:
-                    print(f"No checkpoint found for {model_name} model")
-                    continue
-        
-        # Create visualization directory
-        visualization_dir = os.path.join(Config.evaluate.visualize_dir, model_name)
-        os.makedirs(visualization_dir, exist_ok=True)
-        
-        # Initialize evaluator
-        evaluator = Evaluator(
-            data_root=Config.data.data_root,
-            captions_file=Config.data.captions_file,
-            checkpoint_path=checkpoint_path,
-            beam_search=args.beam_search or Config.evaluate.beam_search,
-            device=device,
-            batch_size=1,  # Use batch size 1 for evaluation
-            visualization_dir=visualization_dir
-        )
-        
-        # If a single test image is provided, evaluate it
-        if args.test_image:
-            result = evaluate_single_image(
-                args.test_image, 
-                evaluator, 
-                model_class, 
-                model_kwargs, 
-                args.beam_search, 
-                args.beam_size,
-                model_name
-            )
-            all_results[model_name] = {"single_image": result}
-            continue
-        
-        # Run full evaluation
-        print(f"Evaluating {model_name} model...")
-        bleu_scores = evaluator.run_evaluation(
-            model_class=model_class,
-            visualize=args.visualize or Config.evaluate.visualize,
-            num_examples=args.num_examples or Config.evaluate.num_examples,
-            **model_kwargs
-        )
-        
-        # Print results
-        print(f"\nEvaluation Results for {model_name} model:")
-        for metric, score in bleu_scores.items():
-            print(f"{metric}: {score:.2f}")
-        
-        # Save results to file
-        results_path = os.path.join(visualization_dir, "bleu_scores.json")
-        with open(results_path, 'w') as f:
-            json.dump(bleu_scores, f, indent=4)
-        
-        print(f"Results saved to {results_path}")
-        
-        # Store results for comparison
-        all_results[model_name] = bleu_scores
-    
-    # Compare results if requested and multiple models were evaluated
-    if args.compare and len(all_results) > 1:
-        compare_results(all_results)
-    
-    print("\nEvaluation complete!")
-
+# Keep get_model_config consistent with train.py defaults or load from checkpoint config if possible
 def get_model_config(model_name: str) -> Tuple[Type[BaseModel], Dict[str, Any]]:
-    """
-    Get the model class and configuration based on the model name
-    
-    Args:
-        model_name: Name of the model
-        
-    Returns:
-        Tuple of (model_class, model_kwargs)
-    """
-    # Model-specific parameters
-    if model_name.lower() == "transformer":
+    """ Gets model class and default parameters (used as fallback). """
+    model_name_lower = model_name.lower()
+    if model_name_lower == "transformer":
         return VisionEncoderDecoder, {
-            'image_size': 224,
-            'channels_in': 3,
-            'patch_size': 16,
-            'hidden_size': 512,
-            'num_layers': (6, 6),  # (encoder_layers, decoder_layers)
-            'num_heads': 8,
+            'image_size': 224, 'channels_in': 3, 'patch_size': 16,
+            'hidden_size': 256, 'num_layers': (1, 1), 'num_heads': 4,
         }
-    elif model_name.lower() == "cnntornn":
+    elif model_name_lower == "cnntornn":
         return CNNtoRNN, {
-            'embed_size': 256,
-            'hidden_size': 512,
-            'num_layers': 2,
-            'dropout_rate': 0.5,
-            'trainCNN': True,  # For evaluation, we want the full model
+            'embed_size': 256, 'hidden_size': 512, 'num_layers': 1,
+            'dropout_rate': 0.5, 'trainCNN': False,
         }
     else:
-        raise ValueError(f"Unknown model name: {model_name}")
+        raise ValueError(f"Unknown model name: {model_name_lower}. Choose 'transformer' or 'cnntornn'.")
 
-def evaluate_single_image(
-    image_path: str, 
-    evaluator: Evaluator, 
-    model_class: Type[BaseModel], 
-    model_kwargs: Dict[str, Any],
-    use_beam_search: bool = True,
-    beam_size: int = 3,
-    model_name: str = "model"
-) -> Dict[str, str]:
-    """
-    Evaluate a single image
-    
-    Args:
-        image_path: Path to the image
-        evaluator: Evaluator instance
-        model_class: Model class
-        model_kwargs: Model keyword arguments
-        use_beam_search: Whether to use beam search
-        beam_size: Beam size for beam search
-        model_name: Name of the model
-        
-    Returns:
-        Dictionary with caption results
-    """
-    # Load model
-    model, vocab = evaluator.load_model(model_class, **model_kwargs)
-    model.eval()
-    
-    # Load and preprocess image
+def compare_results(results_dict: Dict[str, Dict[str, float]], comparison_dir: str = "comparisons") -> None:
+    """ Compare evaluation results from different models using a table and chart. """
+    if not results_dict or len(results_dict) < 1:
+        print("No results to compare.")
+        return
+
+    print("\n" + "="*60)
+    print(" Model Evaluation Results Comparison ")
+    print("="*60)
+
+    model_names = list(results_dict.keys())
+    # Get all metrics reported by the first model (assume others are similar)
+    # Filter out CIDEr if it's present as 0.0 placeholder
+    metrics = [m for m in next(iter(results_dict.values())).keys() if m != 'CIDEr']
+
+    # --- Create Comparison Table ---
     try:
-        image = Image.open(image_path).convert("RGB")
-        image_tensor = evaluator.transform(image).unsqueeze(0).to(evaluator.device)
-        
-        results = {}
-        
-        # Generate caption with beam search if available
-        if use_beam_search and hasattr(model, 'caption_image_beam_search'):
-            tokens = model.caption_image_beam_search(image_tensor, vocab, beam_size=beam_size)
-            beam_caption = " ".join([token for token in tokens if token not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]])
-            results["beam_search"] = beam_caption
-            print(f"\n{model_name} - Beam Search (beam_size={beam_size}):")
-            print(beam_caption)
-        
-        # Generate caption with greedy search if available
-        if hasattr(model, 'caption_image_greedy'):
-            tokens = model.caption_image_greedy(image_tensor, vocab)
-            greedy_caption = " ".join([token for token in tokens if token not in ["<SOS>", "<EOS>", "<PAD>", "<UNK>"]])
-            results["greedy"] = greedy_caption
-            print(f"\n{model_name} - Greedy Search:")
-            print(greedy_caption)
-        
-        # Display results
-        plt.figure(figsize=(10, 8))
-        plt.imshow(image)
-        
-        title = f"{model_name.upper()} Generated Captions:\n"
-        if "beam_search" in results:
-            title += f"Beam Search: {results['beam_search']}\n"
-        if "greedy" in results:
-            title += f"Greedy: {results['greedy']}"
-            
-        plt.title(title, fontsize=12)
-        plt.axis('off')
-        
-        # Save figure
-        output_path = os.path.join(evaluator.visualization_dir, f"single_image_result.png")
-        plt.savefig(output_path, bbox_inches='tight', pad_inches=0.5, dpi=150)
-        plt.close()
-        
-        print(f"\nVisualization saved to {output_path}")
-        
-        return results
-        
-    except Exception as e:
-        print(f"Error evaluating image: {e}")
-        return {"error": str(e)}
+        data = {metric: [results_dict[model].get(metric, 'N/A') for model in model_names]
+                for metric in metrics}
+        df = pd.DataFrame(data, index=model_names).T # Metrics as rows
 
-def compare_results(results: Dict[str, Dict[str, float]]) -> None:
-    """
-    Compare results from different models
-    
-    Args:
-        results: Dictionary mapping model names to their results
-    """
-    print("\n" + "="*50)
-    print("Model Comparison")
-    print("="*50)
-    
-    # Create comparison table
-    metrics = list(next(iter(results.values())).keys())
-    
-    # Print header
-    header = "| Metric | " + " | ".join(results.keys()) + " |"
-    separator = "|" + "-"*(len(header) - 2) + "|"
-    
-    print("\n" + header)
-    print(separator)
-    
-    # Print rows
-    for metric in metrics:
-        row = f"| {metric} | "
-        for model_name in results.keys():
-            if metric in results[model_name]:
-                value = results[model_name][metric]
-                if isinstance(value, float):
-                    row += f"{value:.2f} | "
-                else:
-                    row += f"{value} | "
-            else:
-                row += "N/A | "
-        print(row)
-    
-    # Create comparison chart for BLEU scores
-    if "BLEU-1" in metrics:
-        plt.figure(figsize=(12, 6))
-        
-        # Prepare data
-        model_names = list(results.keys())
-        bleu_metrics = [m for m in metrics if m.startswith("BLEU")]
-        
-        # Set width of bars
-        bar_width = 0.2
-        index = range(len(bleu_metrics))
-        
-        # Plot bars for each model
+        # Format floats nicely
+        df_display = df.applymap(lambda x: f"{x:.2f}" if isinstance(x, (float, np.floating)) else x)
+
+        print("\nComparison Table:")
+        try: print(df_display.to_markdown())
+        except ImportError: print(df_display.to_string())
+
+    except Exception as e:
+        print(f"Error creating comparison table: {e}")
+
+    # --- Create Comparison Bar Chart (Selected Metrics) ---
+    # Keep CIDEr out as it was omitted
+    metrics_to_plot = ['BLEU-4', 'METEOR', 'ROUGE-L', 'BERTScore-F1']
+    # Filter metrics_to_plot based on what's actually available in the results
+    available_metrics_to_plot = [m for m in metrics_to_plot if m in metrics]
+
+    if not available_metrics_to_plot or len(model_names) == 0:
+         print("\nNo plottable metric data found.")
+         return
+
+    plot_data = {m: [] for m in available_metrics_to_plot}
+    valid_metrics_found = False
+
+    for model in model_names:
+        for metric in available_metrics_to_plot:
+            score = results_dict[model].get(metric, 0.0) # Default to 0 if metric missing
+            if score != 0.0: valid_metrics_found = True
+            plot_data[metric].append(score)
+
+    if not valid_metrics_found:
+        print("\nNo valid scores found for plotting.")
+        return
+
+    try:
+        num_models = len(model_names)
+        num_metrics_plot = len(available_metrics_to_plot)
+        bar_width = 0.8 / num_models
+        index = np.arange(num_metrics_plot)
+
+        plt.figure(figsize=(max(8, num_metrics_plot * num_models * 0.8), 6))
+
         for i, model_name in enumerate(model_names):
-            values = [results[model_name][metric] for metric in bleu_metrics]
-            plt.bar([x + i * bar_width for x in index], values, bar_width, label=model_name)
-        
-        # Add labels and title
+            scores = [plot_data[metric][i] for metric in available_metrics_to_plot]
+            plt.bar(index + i * bar_width, scores, bar_width, label=model_name)
+
         plt.xlabel('Metric')
         plt.ylabel('Score')
-        plt.title('BLEU Score Comparison')
-        plt.xticks([x + bar_width * (len(model_names) - 1) / 2 for x in index], bleu_metrics)
-        plt.legend()
-        
-        # Save figure
-        os.makedirs("comparisons", exist_ok=True)
-        plt.savefig("comparisons/bleu_comparison.png", bbox_inches='tight', dpi=150)
+        plt.title('Model Evaluation Metric Comparison')
+        plt.xticks(index + bar_width * (num_models - 1) / 2, available_metrics_to_plot)
+        plt.legend(loc='best')
+        plt.ylim(bottom=0) # Start y-axis at 0
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+        plt.tight_layout()
+
+        os.makedirs(comparison_dir, exist_ok=True)
+        chart_path = os.path.join(comparison_dir, "metrics_comparison.png")
+        plt.savefig(chart_path, dpi=150)
         plt.close()
-        
-        print("\nComparison chart saved to comparisons/bleu_comparison.png")
+        print(f"\nComparison chart saved to: {chart_path}")
+
+    except Exception as e:
+        print(f"Error creating comparison chart: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate and Compare Image Captioning Models (No pycocoevalcap)")
+    parser.add_argument(
+        "--models", type=str, nargs='+', default=["cnntornn", "transformer"],
+        choices=["transformer", "cnntornn"], help="Specify which trained model(s) to evaluate (best checkpoint)."
+    )
+    parser.add_argument(
+        "--config", type=str, default=None, help="Path to a JSON config file for global settings."
+    )
+    parser.add_argument(
+        "--checkpoint_dir", type=str, default=Config.train.checkpoint_dir,
+        help="Base directory containing model checkpoint folders (e.g., 'checkpoints/')."
+    )
+    parser.add_argument(
+        "--captions_file", type=str, default=Config.data.captions_file,
+        help="Path to the captions file for the evaluation set."
+    )
+    parser.add_argument(
+        "--data_root", type=str, default=Config.data.data_root,
+        help="Path to the directory containing evaluation images."
+    )
+    # Args to override specific evaluation behaviors from Config
+    parser.add_argument("--beam", action="store_true", help="Force use of beam search.")
+    parser.add_argument("--no-beam", action="store_true", help="Force use of greedy search.")
+    parser.add_argument("--beam_size", type=int, help="Override beam size.")
+    parser.add_argument("--visualize", action="store_true", help="Force visualization generation.")
+    parser.add_argument("--no-visualize", action="store_true", help="Disable visualization generation.")
+    parser.add_argument("--num_examples", type=int, help="Override number of examples to visualize.")
+    parser.add_argument("--compare", action="store_true", default=True,
+                        help="Generate comparison table/chart if multiple models are evaluated.")
+    parser.add_argument("--no-compare", action="store_false", dest="compare",
+                        help="Disable comparison generation.")
+
+    args = parser.parse_args()
+
+    # --- Configuration Loading & Overrides ---
+    if args.config and os.path.exists(args.config):
+        print(f"Loading configuration from: {args.config}")
+        Config.load_from_json(args.config)
+    else:
+        print("Using default configuration (or previously loaded).")
+
+    Config.train.checkpoint_dir = args.checkpoint_dir
+    Config.data.captions_file = args.captions_file
+    Config.data.data_root = args.data_root
+    if args.beam: Config.evaluate.beam_search = True
+    if args.no_beam: Config.evaluate.beam_search = False
+    if args.beam_size is not None: Config.evaluate.beam_size = args.beam_size
+    if args.visualize: Config.evaluate.visualize = True
+    if args.no_visualize: Config.evaluate.visualize = False
+    if args.num_examples is not None: Config.evaluate.num_examples = args.num_examples
+
+    # --- Evaluation Loop ---
+    all_results = {}
+
+    for model_name in args.models:
+        print(f"\n{'='*50}")
+        print(f"Evaluating Best Model: {model_name.upper()}")
+        print(f"{'='*50}\n")
+
+        model_ckpt_dir = os.path.join(Config.train.checkpoint_dir, model_name)
+        best_checkpoint_path = os.path.join(model_ckpt_dir, "best_model.pth.tar")
+
+        if not os.path.exists(best_checkpoint_path):
+            print(f"Error: 'best_model.pth.tar' not found in {model_ckpt_dir}.")
+            print(f"Skipping evaluation for {model_name}.")
+            continue
+
+        print(f"Found best checkpoint: {best_checkpoint_path}")
+
+        try:
+            model_class, model_kwargs = get_model_config(model_name)
+        except ValueError as e:
+            print(f"Error getting model config: {e}")
+            continue
+
+        evaluator = Evaluator(
+            model_name=model_name,
+            checkpoint_path=best_checkpoint_path,
+            data_root=Config.data.data_root,
+            captions_file=Config.data.captions_file,
+            # Using beam/visualize settings from Config potentially overridden by args
+            beam_search=Config.evaluate.beam_search,
+            beam_size=Config.evaluate.beam_size,
+            visualization_dir=Config.evaluate.visualize_dir
+        )
+
+        metrics = evaluator.run_full_evaluation(
+            model_class=model_class,
+            visualize=Config.evaluate.visualize,
+            num_examples=Config.evaluate.num_examples,
+            **model_kwargs
+        )
+
+        if metrics:
+             all_results[model_name] = metrics
+        else:
+             print(f"\nEvaluation did not produce results for {model_name.upper()}.")
+
+
+    # --- Compare Results ---
+    if args.compare and len(all_results) > 0:
+        compare_results(all_results)
+    elif args.compare:
+         print("\nComparison requested, but no successful evaluation results to compare.")
+
+    print("\n" + "="*50)
+    print("Evaluation Script Finished.")
+    print("="*50)
 
 if __name__ == "__main__":
     main()
-
